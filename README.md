@@ -2,6 +2,8 @@
 
 Shows a click-to-watch notification when someone starts sharing their screen in a Discord call. The button uses Discord's native watch action to open and focus the stream.
 
+Version 1.0.1 fixes the `transitionToChannel is not a function` error on recent Discord builds. If optional call navigation fails, the plugin still attempts to watch the stream.
+
 ## Download and install on Windows
 
 1. Install [Discord desktop](https://discord.com/download), [Node.js 22 or newer](https://nodejs.org/en/download), and [Git for Windows](https://git-scm.com/download/win). npm comes with Node.js; the installer obtains the pnpm version required by Vencord automatically.
@@ -78,6 +80,7 @@ Installer checks (use fake processes and temporary fixtures; do not touch Discor
 
 ```powershell
 node --test scripts/test-installer.cjs
+node --test scripts/test-plugin.cjs
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-launcher.ps1
 ```
 

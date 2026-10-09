@@ -6,12 +6,14 @@ import { Logger } from "@utils/Logger";
 import { Queue } from "@utils/Queue";
 import definePlugin, { OptionType } from "@utils/types";
 import { findByCodeLazy, findByPropsLazy } from "@webpack";
-import { ApplicationStreamingStore, ChannelRouter, ChannelStore, createRoot, GuildStore, React, UserStore, VoiceStateStore } from "@webpack/common";
+import { ApplicationStreamingStore, ChannelStore, createRoot, GuildStore, React, UserStore, VoiceStateStore } from "@webpack/common";
 
 const { selectVoiceChannel } = findByPropsLazy("selectVoiceChannel", "selectChannel");
 // Discord's exports are mangled. Match the native watch action by its behavior;
 // dispatching STREAM_WATCH alone does not focus the stream in the call UI.
 const watchApplicationStream = findByCodeLazy('"STREAM_WATCH"', "forceMultiple", "selectParticipant");
+// Older Vencord builds map this action using .preload, which Discord removed.
+const transitionToChannel = findByCodeLazy(".openTextInVoiceIfVoiceChannel");
 const logger = new Logger("ScreenShareAlert");
 
 // Vencord's showNotification() falls back to a native OS notification whenever Discord isn't
@@ -109,7 +111,12 @@ async function openStream(streamKey: string, channelId: string) {
     if (!stream) throw new Error("This screen share has ended. Wait for a new screen-share notification.");
 
     if (settings.store.openFullscreen) {
-        ChannelRouter.transitionToChannel(channelId);
+        try {
+            transitionToChannel(channelId);
+        } catch (error) {
+            // Navigation is optional: still start/focus the stream if its lookup breaks.
+            logger.warn("Could not navigate to the call; opening the stream in the current view", error);
+        }
     }
 
     watchApplicationStream(stream, { forceFocus: true });
