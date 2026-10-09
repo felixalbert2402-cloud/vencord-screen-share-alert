@@ -1,0 +1,6 @@
+Vencord/
+plugin-backups/
+*.log
+*.zip
+.test-work/
+node_modules/
