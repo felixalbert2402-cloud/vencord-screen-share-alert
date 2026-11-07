@@ -58,6 +58,7 @@ function Start-SelectedDiscord {
 
 $discordStopped = $false
 $exitCode = 0
+$originalPath = $env:Path
 try {
     $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'manifest.json') -Raw | ConvertFrom-Json
     $sourcePlugin = Join-Path $PSScriptRoot 'screenShareAlert\index.ts'
@@ -66,9 +67,7 @@ try {
     }
 
     if (-not $VencordPath) {
-        $parent = Split-Path -Parent $PSScriptRoot
-        if (Test-VencordCheckout $parent) { $VencordPath = $parent }
-        else { $VencordPath = Join-Path $PSScriptRoot 'Vencord' }
+        $VencordPath = Join-Path $PSScriptRoot ('Vencord-' + $manifest.vencordRef)
     }
     $VencordPath = [System.IO.Path]::GetFullPath($VencordPath)
 
@@ -84,30 +83,36 @@ try {
         Where-Object { $_.Name -like 'app-*' -and (Test-Path -LiteralPath (Join-Path $_.FullName 'resources\app.asar')) })
     if ($apps.Count -eq 0) { throw "$DiscordPath is not a supported Discord desktop installation." }
 
-    $node = (Get-Command node.exe -ErrorAction Stop).Source
-    $nodeVersionText = (& $node --version).Trim().TrimStart('v')
-    $nodeVersion = [version] $nodeVersionText
     $cloneNeeded = -not (Test-Path -LiteralPath $VencordPath)
     $dependenciesNeeded = $cloneNeeded -or $InstallDependencies -or
         -not (Test-Path -LiteralPath (Join-Path $VencordPath 'node_modules\esbuild\package.json'))
-    if ($nodeVersion.Major -lt 18 -or ($dependenciesNeeded -and $nodeVersion.Major -lt 22)) {
-        throw 'Install Node.js 22 or newer from https://nodejs.org, then reopen this launcher. An existing build with installed dependencies can use Node.js 18 or newer.'
-    }
     if (-not $cloneNeeded -and -not (Test-VencordCheckout $VencordPath)) {
         throw "$VencordPath already exists but is not a Vencord source checkout. Choose another -VencordPath."
     }
-    if ($cloneNeeded) { $git = (Get-Command git.exe -ErrorAction Stop).Source }
-    if ($dependenciesNeeded) { $npm = (Get-Command npm.cmd -ErrorAction Stop).Source }
-
+    if (-not $cloneNeeded) {
+        $package = Get-Content -LiteralPath (Join-Path $VencordPath 'package.json') -Raw | ConvertFrom-Json
+        $minimumVersion = [version]($manifest.vencordRef.TrimStart('v'))
+        if ([version]$package.version -lt $minimumVersion) {
+            throw "Vencord $($package.version) is too old. Use Vencord $minimumVersion or newer, or omit -VencordPath to install a separate checkout."
+        }
+    }
     Write-Host "ScreenShareAlert $($manifest.version)"
     Write-Host "Vencord: $VencordPath"
     Write-Host "Discord: $DiscordPath ($Branch)"
+    . (Join-Path $PSScriptRoot 'scripts\prerequisites.ps1')
+    $tools = Get-BuildTools -ToolRoot (Join-Path $PSScriptRoot '.tools') -RequireNpm:$dependenciesNeeded -DryRun:$DryRun
     if ($DryRun) {
         Write-Host "Dry run: clone needed = $cloneNeeded; install dependencies = $dependenciesNeeded."
+        Write-Host "Would download portable Node.js = $($tools.DownloadNode); portable Git = $($tools.DownloadGit)."
         Write-Host 'Would back up/copy the plugin, build Vencord, close Discord, inject, and restart Discord.'
         Write-Host 'No files or processes changed.'
         return
     }
+    $node = $tools.NodePath
+    $npm = $tools.NpmPath
+    $git = $tools.GitPath
+    # npm scripts and Vencord's build invoke node/git by name in child processes.
+    $env:Path = (Split-Path -Parent $node) + ';' + (Split-Path -Parent $git) + ';' + $originalPath
 
     if ($cloneNeeded) {
         Write-Host "Downloading official Vencord source ($($manifest.vencordRef))..."
@@ -164,6 +169,7 @@ try {
     Write-Host "Installation failed: $($_.Exception.Message)" -ForegroundColor Red
     $exitCode = 1
 } finally {
+    $env:Path = $originalPath
     if ($discordStopped) {
         try {
             Write-Host 'Restarting Discord after the failed installation...'
