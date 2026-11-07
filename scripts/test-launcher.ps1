@@ -8,29 +8,28 @@ $launcherSource = Get-Content -LiteralPath (Join-Path $bundleRoot 'Install-Scree
 $launcherSource = $launcherSource.Replace('Set-StrictMode -Version Latest',
     ('$PSScriptRoot = $bundleRoot' + "`nSet-StrictMode -Version Latest"))
 $launcherSource = $launcherSource.Replace('exit $exitCode', 'return $exitCode')
+$launcherSource = $launcherSource.Replace('    . (Join-Path $PSScriptRoot ''scripts\prerequisites.ps1'')', '')
 $launcher = [scriptblock]::Create($launcherSource)
 
-function Get-Command {
-    [CmdletBinding()]
-    param([string] $Name)
-    switch ($Name) {
-        'node.exe' { return [pscustomobject]@{ Source = 'Invoke-FakeNode' } }
-        'npm.cmd' { return [pscustomobject]@{ Source = 'Invoke-FakeNpm' } }
-        'git.exe' { return [pscustomobject]@{ Source = 'Invoke-FakeGit' } }
-        default { throw "Unexpected real tool lookup: $Name" }
+function Get-BuildTools {
+    param([string] $ToolRoot, [switch] $RequireNpm, [switch] $DryRun)
+    return [pscustomobject]@{
+        NodePath = 'Invoke-FakeNode'
+        NpmPath = 'Invoke-FakeNpm'
+        GitPath = 'Invoke-FakeGit'
     }
 }
 function Invoke-FakeGit {
     param([Parameter(ValueFromRemainingArguments = $true)] [string[]] $Arguments)
     $global:LASTEXITCODE = 0
-    if ($Arguments[0] -eq 'rev-parse') { return 'aa5a764b7ff9cd0d433201dafcc8966e0edbebd7' }
+    if ($Arguments[0] -eq 'rev-parse') { return '383409e6a6ec9008ee8a7496500f1e75f17824d1' }
     if ($Arguments[0] -ne 'clone' -or $Arguments -notcontains 'https://github.com/Vendicated/Vencord.git') {
         throw 'Unexpected git operation.'
     }
     $events.Add('clone')
     $clonePath = $Arguments[-1]
     New-Item -ItemType Directory -Path (Join-Path $clonePath 'scripts\build') -Force | Out-Null
-    Set-Content -LiteralPath (Join-Path $clonePath 'package.json') -Value '{"name":"vencord","packageManager":"pnpm@11.9.0"}'
+    Set-Content -LiteralPath (Join-Path $clonePath 'package.json') -Value '{"name":"vencord","version":"1.15.16","packageManager":"pnpm@12.15.0"}'
     Set-Content -LiteralPath (Join-Path $clonePath 'scripts\build\build.mjs') -Value '// fixture'
 }
 function Invoke-FakeNode {
@@ -73,20 +72,23 @@ function Start-Process {
     $events.Add('start')
 }
 
-foreach ($scenario in @('success', 'build-failure', 'inject-failure', 'install-dependencies', 'fresh-install')) {
+foreach ($scenario in @('success', 'build-failure', 'inject-failure', 'install-dependencies', 'fresh-install', 'outdated-checkout')) {
     $fixture = Join-Path $bundleRoot ('.test-work\' + $scenario)
     $checkout = Join-Path $fixture 'Vencord with spaces'
     $discord = Join-Path $fixture 'Discord with spaces'
     foreach ($directory in @('scripts\build', 'node_modules\esbuild', 'src\userplugins\screenShareAlert')) {
         New-Item -ItemType Directory -Path (Join-Path $checkout $directory) -Force | Out-Null
     }
-    Set-Content -LiteralPath (Join-Path $checkout 'package.json') -Value '{"name":"vencord","packageManager":"pnpm@11.9.0"}'
+    Set-Content -LiteralPath (Join-Path $checkout 'package.json') -Value '{"name":"vencord","version":"1.15.16","packageManager":"pnpm@12.15.0"}'
     Set-Content -LiteralPath (Join-Path $checkout 'scripts\build\build.mjs') -Value '// fixture'
     Set-Content -LiteralPath (Join-Path $checkout 'node_modules\esbuild\package.json') -Value '{}'
     Set-Content -LiteralPath (Join-Path $checkout 'src\userplugins\screenShareAlert\index.ts') -Value '// old plugin'
     New-Item -ItemType Directory -Path (Join-Path $discord 'app-1.0.1\resources') -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $discord 'app-1.0.1\resources\app.asar') -Value 'fixture'
     Set-Content -LiteralPath (Join-Path $discord 'Update.exe') -Value 'fixture'
+    if ($scenario -eq 'outdated-checkout') {
+        Set-Content -LiteralPath (Join-Path $checkout 'package.json') -Value '{"name":"vencord","version":"1.15.1","packageManager":"pnpm@11.9.0"}'
+    }
     if ($scenario -eq 'fresh-install') { $checkout = Join-Path $fixture ('Downloaded Vencord ' + [DateTime]::UtcNow.Ticks) }
     $events = New-Object 'System.Collections.Generic.List[string]'
     $script:fakeDiscordRunning = $true
@@ -94,6 +96,7 @@ foreach ($scenario in @('success', 'build-failure', 'inject-failure', 'install-d
     $injectResult = if ($scenario -eq 'inject-failure') { 1 } else { 0 }
     $code = & $launcher -VencordPath $checkout -DiscordPath $discord -InstallDependencies:($scenario -eq 'install-dependencies')
     $expected = switch ($scenario) {
+        'outdated-checkout' { '' }
         'success' { 'build,prepare,stop,inject,start' }
         'build-failure' { 'build' }
         'inject-failure' { 'build,prepare,stop,inject,start' }
@@ -101,10 +104,15 @@ foreach ($scenario in @('success', 'build-failure', 'inject-failure', 'install-d
         'fresh-install' { 'clone,dependencies,build,prepare,stop,inject,start' }
     }
     if (($events -join ',') -ne $expected) { throw "${scenario}: expected $expected; got $($events -join ',')" }
-    $expectedCode = if ($scenario -like '*failure') { 1 } else { 0 }
+    $expectedCode = if ($scenario -like '*failure' -or $scenario -eq 'outdated-checkout') { 1 } else { 0 }
     if ($code -ne $expectedCode) { throw "${scenario}: unexpected exit code $code" }
     $copied = Get-Content -LiteralPath (Join-Path $checkout 'src\userplugins\screenShareAlert\index.ts') -Raw
     $original = Get-Content -LiteralPath (Join-Path $bundleRoot 'screenShareAlert\index.ts') -Raw
+    if ($scenario -eq 'outdated-checkout') {
+        if ($copied.Trim() -ne '// old plugin') { throw 'Outdated checkout was modified.' }
+        Write-Host "PASS: $scenario"
+        continue
+    }
     if ($copied -ne $original) { throw "${scenario}: plugin source copy failed" }
     Write-Host "PASS: $scenario"
 }
